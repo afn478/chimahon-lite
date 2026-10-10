@@ -16,7 +16,6 @@ import eu.kanade.core.preference.asState
 import eu.kanade.core.util.fastFilterNot
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.chapter.interactor.SetReadStatus
-import eu.kanade.domain.manga.interactor.SmartSearchMerge
 import eu.kanade.domain.manga.interactor.UpdateManga
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.sync.SyncPreferences
@@ -24,6 +23,7 @@ import eu.kanade.presentation.components.SEARCH_DEBOUNCE_MILLIS
 import eu.kanade.presentation.library.components.LibraryToolbarTitle
 import eu.kanade.presentation.manga.DownloadAction
 import eu.kanade.tachiyomi.data.cache.CoverCache
+import eu.kanade.tachiyomi.data.cache.LocalCoverRecovery
 import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.track.TrackStatus
@@ -58,10 +58,10 @@ import exh.util.isLewd
 import exh.util.nullIfBlank
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.ImmutableSet
-import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.collections.immutable.toImmutableSet
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -72,6 +72,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.dropWhile
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
@@ -81,6 +82,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.runBlocking
+import logcat.LogPriority
 import mihon.core.common.utils.mutate
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.preference.CheckboxState
@@ -89,6 +91,7 @@ import tachiyomi.core.common.util.lang.compareToWithCollator
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.launchNonCancellable
 import tachiyomi.core.common.util.lang.withIOContext
+import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.category.interactor.SetMangaCategories
 import tachiyomi.domain.category.model.Category
@@ -125,6 +128,7 @@ import tachiyomi.source.local.LocalSource
 import tachiyomi.source.local.isLocal
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 import tachiyomi.domain.source.model.Source as DomainSource
 
@@ -159,7 +163,7 @@ class LibraryScreenModel(
     syncPreferences: SyncPreferences = Injekt.get(),
     // SY <--
     // KMK -->
-    private val smartSearchMerge: SmartSearchMerge = Injekt.get(),
+    private val localCoverRecovery: LocalCoverRecovery = LocalCoverRecovery(),
     // KMK <--
 ) : StateScreenModel<LibraryScreenModel.State>(State()) {
 
@@ -168,9 +172,13 @@ class LibraryScreenModel(
     val recommendationSearch = RecommendationSearchHelper(preferences.context)
 
     private var recommendationSearchJob: Job? = null
+    private val scheduledLocalCoverIds = ConcurrentHashMap.newKeySet<Long>()
     // SY <--
 
     init {
+        if (libraryPreferences.groupLibraryBy().get() == LibraryGroup.BY_SOURCE) {
+            libraryPreferences.groupLibraryBy().set(LibraryGroup.BY_DEFAULT)
+        }
         mutableState.update { state ->
             state.copy(activeCategoryIndex = libraryPreferences.lastUsedCategory().get())
         }
@@ -334,12 +342,10 @@ class LibraryScreenModel(
             getTrackingFiltersFlow(),
         ) { prefs, trackFilters ->
             listOf(
-                prefs.filterDownloaded,
                 prefs.filterUnread,
                 prefs.filterStarted,
                 prefs.filterBookmarked,
                 prefs.filterCompleted,
-                prefs.filterIntervalCustom,
                 // SY -->
                 prefs.filterLewd,
                 // SY <--
@@ -431,14 +437,10 @@ class LibraryScreenModel(
         excludedCategories: ImmutableSet<Long>,
         // KMK <--
     ): List<LibraryItem> {
-        val downloadedOnly = preferences.globalFilterDownloaded
-        val skipOutsideReleasePeriod = preferences.skipOutsideReleasePeriod
-        val filterDownloaded = if (downloadedOnly) TriState.ENABLED_IS else preferences.filterDownloaded
         val filterUnread = preferences.filterUnread
         val filterStarted = preferences.filterStarted
         val filterBookmarked = preferences.filterBookmarked
         val filterCompleted = preferences.filterCompleted
-        val filterIntervalCustom = preferences.filterIntervalCustom
         val filterCategories = preferences.filterCategories
 
         val isNotLoggedInAnyTrack = trackingFilter.isEmpty()
@@ -450,23 +452,6 @@ class LibraryScreenModel(
         // SY -->
         val filterLewd = preferences.filterLewd
         // SY <--
-
-        val filterFnDownloaded: suspend (LibraryItem) -> Boolean = {
-            applyFilter(filterDownloaded) {
-                it.libraryManga.manga.isLocal() ||
-                    it.downloadCount > 0 ||
-                    // KMK -->
-                    if (it.libraryManga.manga.source == MERGED_SOURCE_ID) {
-                        // FIXME: Calling await in filter could lead to N+1 performance issues.
-                        //  Should include all the merged references in library query instead.
-                        getMergedMangaById.await(it.libraryManga.manga.id)
-                            .sumOf { manga -> downloadManager.getDownloadCount(manga) } > 0
-                    } else {
-                        // KMK <--
-                        downloadManager.getDownloadCount(it.libraryManga.manga) > 0
-                    }
-            }
-        }
 
         val filterFnUnread: (LibraryItem) -> Boolean = {
             applyFilter(filterUnread) { it.libraryManga.unreadCount > 0 }
@@ -482,14 +467,6 @@ class LibraryScreenModel(
 
         val filterFnCompleted: (LibraryItem) -> Boolean = {
             applyFilter(filterCompleted) { it.libraryManga.manga.status.toInt() == SManga.COMPLETED }
-        }
-
-        val filterFnIntervalCustom: (LibraryItem) -> Boolean = {
-            if (skipOutsideReleasePeriod) {
-                applyFilter(filterIntervalCustom) { it.libraryManga.manga.fetchInterval < 0 }
-            } else {
-                true
-            }
         }
 
         // SY -->
@@ -530,12 +507,10 @@ class LibraryScreenModel(
         // KMK <--
 
         return fastFilter {
-            filterFnDownloaded(it) &&
-                filterFnUnread(it) &&
+            filterFnUnread(it) &&
                 filterFnStarted(it) &&
                 filterFnBookmarked(it) &&
                 filterFnCompleted(it) &&
-                filterFnIntervalCustom(it) &&
                 filterFnTracking(it) &&
                 // SY -->
                 filterFnLewd(it) &&
@@ -727,56 +702,40 @@ class LibraryScreenModel(
     }
 
     private fun getLibraryItemPreferencesFlow(): Flow<ItemPreferences> {
-        return combine(
-            libraryPreferences.downloadBadge().changes(),
+        return combine<Any, ItemPreferences>(
             libraryPreferences.unreadBadge().changes(),
             libraryPreferences.localBadge().changes(),
             libraryPreferences.languageBadge().changes(),
-            libraryPreferences.autoUpdateMangaRestrictions().changes(),
-
-            preferences.downloadedOnly().changes(),
-            libraryPreferences.filterDownloaded().changes(),
             libraryPreferences.filterUnread().changes(),
             libraryPreferences.filterStarted().changes(),
             libraryPreferences.filterBookmarked().changes(),
             libraryPreferences.filterCompleted().changes(),
-            libraryPreferences.filterIntervalCustom().changes(),
-            // SY -->
             libraryPreferences.filterLewd().changes(),
-            // SY <--
-            // KMK -->
             libraryPreferences.sourceBadge().changes(),
             libraryPreferences.useLangIcon().changes(),
             libraryPreferences.filterCategories().changes(),
-            // KMK <--
         ) {
             ItemPreferences(
-                downloadBadge = it[0] as Boolean,
-                unreadBadge = it[1] as Boolean,
-                localBadge = it[2] as Boolean,
-                languageBadge = it[3] as Boolean,
-                skipOutsideReleasePeriod = LibraryPreferences.MANGA_OUTSIDE_RELEASE_PERIOD in (it[4] as Set<*>),
-                globalFilterDownloaded = it[5] as Boolean,
-                filterDownloaded = it[6] as TriState,
-                filterUnread = it[7] as TriState,
-                filterStarted = it[8] as TriState,
-                filterBookmarked = it[9] as TriState,
-                filterCompleted = it[10] as TriState,
-                filterIntervalCustom = it[11] as TriState,
-                // SY -->
-                filterLewd = it[12] as TriState,
-                // SY <--
-                // KMK -->
-                sourceBadge = it[13] as Boolean,
-                useLangIcon = it[14] as Boolean,
-                filterCategories = it[15] as Boolean,
+                unreadBadge = it[0] as Boolean,
+                localBadge = it[1] as Boolean,
+                languageBadge = it[2] as Boolean,
+                filterUnread = it[3] as TriState,
+                filterStarted = it[4] as TriState,
+                filterBookmarked = it[5] as TriState,
+                filterCompleted = it[6] as TriState,
+                filterLewd = it[7] as TriState,
+                sourceBadge = it[8] as Boolean,
+                useLangIcon = it[9] as Boolean,
+                filterCategories = it[10] as Boolean,
             )
         }
     }
 
     private fun getFavoritesFlow(): Flow<List<LibraryItem>> {
         return combine(
-            getLibraryManga.subscribe(),
+            getLibraryManga.subscribe().onEach { library ->
+                library.forEach { scheduleLocalCoverRecovery(it.manga) }
+            },
             getLibraryItemPreferencesFlow(),
             downloadCache.changes,
         ) { libraryManga, preferences, _ ->
@@ -787,20 +746,7 @@ class LibraryScreenModel(
                 // KMK <--
                 LibraryItem(
                     libraryManga = manga,
-                    downloadCount = if (preferences.downloadBadge) {
-                        // SY -->
-                        if (manga.manga.source == MERGED_SOURCE_ID) {
-                            // FIXME: N+1 performance issues.
-                            //  Should include all the merged references in library query instead.
-                            getMergedMangaById.await(manga.manga.id)
-                                .sumOf { downloadManager.getDownloadCount(it) }.toLong()
-                        } else {
-                            // SY <--
-                            downloadManager.getDownloadCount(manga.manga).toLong()
-                        }
-                    } else {
-                        0
-                    },
+                    downloadCount = 0,
                     unreadCount = if (preferences.unreadBadge) {
                         manga.unreadCount
                     } else {
@@ -831,6 +777,25 @@ class LibraryScreenModel(
                     },
                     // KMK <--
                 )
+            }
+        }
+    }
+
+    private fun scheduleLocalCoverRecovery(manga: Manga) {
+        if (!manga.isLocal() || !scheduledLocalCoverIds.add(manga.id)) return
+        screenModelScope.launchIO {
+            try {
+                // Source initialization is asynchronous on cold start, including immediately after updating.
+                sourceManager.isInitialized.first { it }
+                val source = sourceManager.get(manga.source) as? LocalSource ?: return@launchIO
+                localCoverRecovery.recover(manga, source)
+            } catch (e: CancellationException) {
+                scheduledLocalCoverIds.remove(manga.id)
+                throw e
+            } catch (e: Exception) {
+                // Keep a failed book from retrying on every other cover's database update.
+                // Opening a new library screen or Browse can retry once storage is available again.
+                logcat(LogPriority.ERROR, e) { "Error recovering local library cover for ${manga.id}" }
             }
         }
     }
@@ -1631,24 +1596,10 @@ class LibraryScreenModel(
      * Will get first merged manga in the list as target merging.
      * If there is no merged manga, then it will use the first one in list to create a new target.
      */
-    suspend fun smartSearchMerge(selectedMangas: PersistentList<Manga>): Long? {
-        val mergedManga = selectedMangas.firstOrNull { it.source == MERGED_SOURCE_ID }?.let { listOf(it) }
-            ?: emptyList()
-        val mergingMangas = selectedMangas.fastFilterNot { it.source == MERGED_SOURCE_ID }
-        val toMergeMangas = mergedManga + mergingMangas
-        if (toMergeMangas.size <= 1) return null
-
-        var mergingMangaId = toMergeMangas.first().id
-        for (manga in toMergeMangas.drop(1)) {
-            mergingMangaId = smartSearchMerge.smartSearchMerge(manga, mergingMangaId).id
-        }
-        return mergingMangaId
-    }
     // KMK <--
 
     @Immutable
     private data class ItemPreferences(
-        val downloadBadge: Boolean,
         val unreadBadge: Boolean,
         val localBadge: Boolean,
         val languageBadge: Boolean,
@@ -1656,15 +1607,11 @@ class LibraryScreenModel(
         val useLangIcon: Boolean,
         val sourceBadge: Boolean,
         // KMK <--
-        val skipOutsideReleasePeriod: Boolean,
 
-        val globalFilterDownloaded: Boolean,
-        val filterDownloaded: TriState,
         val filterUnread: TriState,
         val filterStarted: TriState,
         val filterBookmarked: TriState,
         val filterCompleted: TriState,
-        val filterIntervalCustom: TriState,
         // SY -->
         val filterLewd: TriState,
         // SY <--

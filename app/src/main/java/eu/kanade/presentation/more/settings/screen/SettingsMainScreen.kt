@@ -13,9 +13,7 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.CollectionsBookmark
 import androidx.compose.material.icons.outlined.DocumentScanner
 import androidx.compose.material.icons.outlined.Explore
-import androidx.compose.material.icons.outlined.GetApp
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Security
@@ -264,14 +262,6 @@ object SettingsMainScreen : Screen() {
         ),
         MainEntry.Item(
             Item(
-                titleRes = MR.strings.pref_category_downloads,
-                subtitleRes = MR.strings.pref_downloads_summary,
-                icon = Icons.Outlined.GetApp,
-                screen = SettingsDownloadScreen,
-            ),
-        ),
-        MainEntry.Item(
-            Item(
                 titleRes = MR.strings.browse,
                 subtitleRes = MR.strings.pref_browse_summary,
                 icon = Icons.Outlined.Explore,
@@ -322,16 +312,6 @@ object SettingsMainScreen : Screen() {
                 screen = SettingsTrackingScreen,
             ),
         ),
-        // AM (CONNECTIONS) -->
-        MainEntry.Item(
-            Item(
-                titleRes = KMR.strings.pref_category_connections,
-                subtitleRes = KMR.strings.pref_connections_summary,
-                icon = Icons.Outlined.Link,
-                screen = SettingsConnectionScreen,
-            ),
-        ),
-        // <-- AM (CONNECTIONS)
         MainEntry.Item(
             Item(
                 titleRes = MR.strings.label_data_storage,

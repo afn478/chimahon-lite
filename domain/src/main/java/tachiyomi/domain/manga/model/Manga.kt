@@ -87,7 +87,8 @@ data class Manga(
             .let { Instant.ofEpochMilli(it) }
 
     val sorting: Long
-        get() = chapterFlags and CHAPTER_SORTING_MASK
+        get() = (chapterFlags and CHAPTER_SORTING_MASK).takeUnless { it == CHAPTER_SORTING_SOURCE }
+            ?: CHAPTER_SORTING_NUMBER
 
     val displayMode: Long
         get() = chapterFlags and CHAPTER_DISPLAY_MASK
@@ -96,7 +97,8 @@ data class Manga(
         get() = chapterFlags and CHAPTER_UNREAD_MASK
 
     val downloadedFilterRaw: Long
-        get() = chapterFlags and CHAPTER_DOWNLOADED_MASK
+        // Ignore retired filter bits, including values restored from older backups.
+        get() = SHOW_ALL
 
     val bookmarkedFilterRaw: Long
         get() = chapterFlags and CHAPTER_BOOKMARKED_MASK
@@ -116,7 +118,8 @@ data class Manga(
         }
 
     fun sortDescending(): Boolean {
-        return chapterFlags and CHAPTER_SORT_DIR_MASK == CHAPTER_SORT_DESC
+        return (chapterFlags and CHAPTER_SORTING_MASK) != CHAPTER_SORTING_SOURCE &&
+            (chapterFlags and CHAPTER_SORT_DIR_MASK) == CHAPTER_SORT_DESC
     }
 
     companion object {
@@ -162,7 +165,7 @@ data class Manga(
             fetchInterval = 0,
             dateAdded = 0L,
             viewerFlags = 0L,
-            chapterFlags = 0L,
+            chapterFlags = CHAPTER_SORTING_NUMBER or CHAPTER_SORT_ASC,
             coverLastModified = 0L,
             // SY -->
             ogArtist = null,

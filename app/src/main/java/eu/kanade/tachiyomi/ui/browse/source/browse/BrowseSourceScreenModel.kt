@@ -25,12 +25,12 @@ import eu.kanade.domain.track.interactor.AddTracks
 import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.util.ioCoroutineScope
 import eu.kanade.tachiyomi.data.cache.CoverCache
+import eu.kanade.tachiyomi.data.cache.LocalCoverRecovery
 import eu.kanade.tachiyomi.extension.ExtensionManager
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.online.MetadataSource
 import eu.kanade.tachiyomi.source.online.all.MangaDex
 import eu.kanade.tachiyomi.util.removeCovers
-import eu.kanade.tachiyomi.util.updateLocalCoverFromSourceFetch
 import exh.metadata.metadata.RaisedSearchMetadata
 import exh.source.EH_PACKAGE
 import exh.source.ExhPreferences
@@ -84,11 +84,13 @@ import tachiyomi.domain.source.model.StubSource
 import tachiyomi.domain.source.repository.SourcePagingSource
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.i18n.sy.SYMR
+import tachiyomi.source.local.LocalSource
 import tachiyomi.source.local.isLocal
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import xyz.nulldev.ts.api.http.serializer.FilterSerializer
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import eu.kanade.tachiyomi.source.model.Filter as SourceModelFilter
 
 open class BrowseSourceScreenModel(
@@ -110,6 +112,7 @@ open class BrowseSourceScreenModel(
     private val setMangaDefaultChapterFlags: SetMangaDefaultChapterFlags = Injekt.get(),
     private val getManga: GetManga = Injekt.get(),
     private val updateManga: UpdateManga = Injekt.get(),
+    private val localCoverRecovery: LocalCoverRecovery = LocalCoverRecovery(),
     private val addTracks: AddTracks = Injekt.get(),
     getIncognitoState: GetIncognitoState = Injekt.get(),
     // KMK -->
@@ -127,6 +130,8 @@ open class BrowseSourceScreenModel(
     private val getExhSavedSearch: GetExhSavedSearch = Injekt.get(),
     // SY <--
 ) : StateScreenModel<BrowseSourceScreenModel.State>(State(Listing.valueOf(listingQuery))) {
+
+    private val localCoverGenerationUrls = ConcurrentHashMap.newKeySet<String>()
 
     var displayMode by sourcePreferences.sourceDisplayMode().asState(screenModelScope)
 
@@ -229,6 +234,7 @@ open class BrowseSourceScreenModel(
                 // SY <--
             }.flow.map { pagingData ->
                 pagingData.map { (manga, metadata) ->
+                    scheduleLocalCoverGeneration(manga)
                     getManga.subscribe(manga.url, manga.source)
                         .map { it ?: manga }
                         // SY -->
@@ -241,6 +247,32 @@ open class BrowseSourceScreenModel(
                 .cachedIn(ioCoroutineScope)
         }
         .stateIn(ioCoroutineScope, SharingStarted.Lazily, emptyFlow())
+
+    /**
+     * Local source entries can be listed before their first chapter has been read. Queue cover
+     * extraction after the entry has been inserted so the initial page stays responsive. The
+     * screen model scope owns these jobs, which also stops extraction when the browse screen is
+     * closed.
+     */
+    private fun scheduleLocalCoverGeneration(manga: Manga) {
+        val localSource = source as? LocalSource ?: return
+        if (manga.source != localSource.id) return
+
+        if (!localCoverGenerationUrls.add(manga.url)) return
+
+        screenModelScope.launchIO {
+            try {
+                localCoverRecovery.recover(manga, localSource)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                logcat(LogPriority.ERROR, e) { "Error generating local cover for ${manga.title}" }
+            } finally {
+                // Deduplicate pending work, but allow a later browse to repair another cache eviction.
+                localCoverGenerationUrls.remove(manga.url)
+            }
+        }
+    }
 
     fun getColumnsPreference(orientation: Int): GridCells {
         val isLandscape = orientation == Configuration.ORIENTATION_LANDSCAPE

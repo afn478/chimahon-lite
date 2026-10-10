@@ -21,10 +21,10 @@ android {
     namespace = "eu.kanade.tachiyomi"
 
     defaultConfig {
-        applicationId = "app.chimahon"
+        applicationId = "app.chimahon.lite"
 
-        versionCode = releaseVersionCode ?: 3
-        versionName = releaseVersionName ?: "1.1.0"
+        versionCode = releaseVersionCode ?: 9
+        versionName = releaseVersionName ?: "1.3.2"
 
         buildConfigField("String", "COMMIT_COUNT", "\"${getCommitCount()}\"")
         buildConfigField("String", "COMMIT_SHA", "\"${getGitSha()}\"")
@@ -335,6 +335,7 @@ dependencies {
 
     // Tests
     testImplementation(libs.bundles.test)
+    testImplementation(kotlin("test"))
     testRuntimeOnly(libs.junit.platform.launcher)
 
     // For detecting memory leaks; see https://square.github.io/leakcanary/

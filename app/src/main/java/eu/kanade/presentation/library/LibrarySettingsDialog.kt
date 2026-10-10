@@ -37,11 +37,9 @@ import eu.kanade.presentation.components.TabbedDialogPaddings
 import eu.kanade.presentation.more.settings.widget.TriStateListDialog
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.ui.library.LibrarySettingsScreenModel
-import eu.kanade.tachiyomi.util.system.isReleaseBuildType
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.flow.map
-import tachiyomi.core.common.preference.TriState
 import tachiyomi.core.common.preference.toggle
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.library.model.LibraryDisplayMode
@@ -124,20 +122,6 @@ private fun ColumnScope.FilterPage(
     screenModel: LibrarySettingsScreenModel,
     categories: List<Category>,
 ) {
-    val filterDownloaded by screenModel.libraryPreferences.filterDownloaded().collectAsState()
-    val downloadedOnly by screenModel.preferences.downloadedOnly().collectAsState()
-    val autoUpdateMangaRestrictions by screenModel.libraryPreferences.autoUpdateMangaRestrictions().collectAsState()
-
-    TriStateItem(
-        label = stringResource(MR.strings.label_downloaded),
-        state = if (downloadedOnly) {
-            TriState.ENABLED_IS
-        } else {
-            filterDownloaded
-        },
-        enabled = !downloadedOnly,
-        onClick = { screenModel.toggleFilter(LibraryPreferences::filterDownloaded) },
-    )
     val filterUnread by screenModel.libraryPreferences.filterUnread().collectAsState()
     TriStateItem(
         label = stringResource(MR.strings.action_filter_unread),
@@ -158,19 +142,10 @@ private fun ColumnScope.FilterPage(
     )
     val filterCompleted by screenModel.libraryPreferences.filterCompleted().collectAsState()
     TriStateItem(
-        label = stringResource(MR.strings.completed),
+        label = stringResource(KMR.strings.publication_completed),
         state = filterCompleted,
         onClick = { screenModel.toggleFilter(LibraryPreferences::filterCompleted) },
     )
-    // TODO: re-enable when custom intervals are ready for stable
-    if ((!isReleaseBuildType) && LibraryPreferences.MANGA_OUTSIDE_RELEASE_PERIOD in autoUpdateMangaRestrictions) {
-        val filterIntervalCustom by screenModel.libraryPreferences.filterIntervalCustom().collectAsState()
-        TriStateItem(
-            label = stringResource(MR.strings.action_filter_interval_custom),
-            state = filterIntervalCustom,
-            onClick = { screenModel.toggleFilter(LibraryPreferences::filterIntervalCustom) },
-        )
-    }
     // SY -->
     val filterLewd by screenModel.libraryPreferences.filterLewd().collectAsState()
     TriStateItem(
@@ -358,10 +333,6 @@ private fun ColumnScope.DisplayPage(
 
     HeadingItem(MR.strings.overlay_header)
     CheckboxItem(
-        label = stringResource(MR.strings.action_display_download_badge),
-        pref = screenModel.libraryPreferences.downloadBadge(),
-    )
-    CheckboxItem(
         label = stringResource(MR.strings.action_display_unread_badge),
         pref = screenModel.libraryPreferences.unreadBadge(),
     )
@@ -419,7 +390,6 @@ private fun groupTypeDrawableRes(type: Int): Int {
     return when (type) {
         LibraryGroup.BY_STATUS -> R.drawable.ic_progress_clock_24dp
         LibraryGroup.BY_TRACK_STATUS -> R.drawable.ic_sync_24dp
-        LibraryGroup.BY_SOURCE -> R.drawable.ic_browse_filled_24dp
         LibraryGroup.UNGROUPED -> R.drawable.ic_ungroup_24dp
         else -> R.drawable.ic_label_24dp
     }
@@ -435,7 +405,6 @@ private fun ColumnScope.GroupPage(
     val groups = remember(hasCategories, trackers) {
         buildList {
             add(LibraryGroup.BY_DEFAULT)
-            add(LibraryGroup.BY_SOURCE)
             add(LibraryGroup.BY_STATUS)
             if (trackers.isNotEmpty()) {
                 add(LibraryGroup.BY_TRACK_STATUS)

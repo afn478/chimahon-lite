@@ -46,7 +46,7 @@ fun MangaToolbar(
     onClickDownload: ((DownloadAction) -> Unit)?,
     onClickEditCategory: (() -> Unit)?,
     onClickRefresh: () -> Unit,
-    onClickMigrate: (() -> Unit)?,
+    onClickRelinkFolder: (() -> Unit)?,
     onClickEditNotes: () -> Unit,
     // SY -->
     onClickEditInfo: (() -> Unit)?,
@@ -58,8 +58,6 @@ fun MangaToolbar(
     onOpenMangaFolder: (() -> Unit)?,
     // KMK <--
     onClickRecommend: (() -> Unit)?,
-    onClickMerge: (() -> Unit)?,
-    onClickMergedSettings: (() -> Unit)?,
     // SY <--
     onClickDictionaryProfile: (() -> Unit)?,
     onClickPreOcr: (() -> Unit)?,
@@ -172,11 +170,11 @@ fun MangaToolbar(
                             ),
                         )
                     }
-                    if (onClickMigrate != null) {
+                    if (onClickRelinkFolder != null) {
                         add(
                             AppBar.OverflowAction(
-                                title = stringResource(MR.strings.action_migrate),
-                                onClick = onClickMigrate,
+                                title = stringResource(MR.strings.action_relink_folder),
+                                onClick = onClickRelinkFolder,
                             ),
                         )
                     }
@@ -195,14 +193,6 @@ fun MangaToolbar(
                         ),
                     )
                     // SY -->
-                    if (onClickMerge != null) {
-                        add(
-                            AppBar.OverflowAction(
-                                title = stringResource(SYMR.strings.merge),
-                                onClick = onClickMerge,
-                            ),
-                        )
-                    }
                     if (onClickEditInfo != null) {
                         add(
                             AppBar.OverflowAction(
@@ -229,14 +219,6 @@ fun MangaToolbar(
                             ),
                         )
                     }
-                    if (onClickMergedSettings != null) {
-                        add(
-                            AppBar.OverflowAction(
-                                title = stringResource(SYMR.strings.merge_settings),
-                                onClick = onClickMergedSettings,
-                            ),
-                        )
-                    }
                     // SY <--
                     // KMK -->
                     if (onOpenMangaFolder != null) {
@@ -249,7 +231,7 @@ fun MangaToolbar(
                     }
                     add(
                         AppBar.OverflowAction(
-                            title = stringResource(KMR.strings.action_clear_manga),
+                            title = stringResource(KMR.strings.manage_manga_data),
                             onClick = onClearManga,
                         ),
                     )
