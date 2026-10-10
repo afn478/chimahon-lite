@@ -13,18 +13,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  get_tag:
-    name: Extract tag name
+  build:
+    name: Build and release
     runs-on: 'ubuntu-24.04'
-    outputs:
-      tag: ${{ steps.extract.outputs.tag }}
-      version_name: ${{ steps.extract.outputs.version_name }}
-      version_code: ${{ steps.extract.outputs.version_code }}
 
     steps:
       - name: Get tag name
         id: extract
         run: |
+          set -euo pipefail
           tag="${GITHUB_REF#refs/tags/}"
           version_name="${tag#v}"
 
@@ -42,12 +39,6 @@ jobs:
           echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
           echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
 
-  build:
-    name: Build
-    runs-on: 'ubuntu-24.04'
-    needs: get_tag
-
-    steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -72,70 +63,115 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
 
-      - name: Write client_secrets.json
-        uses: DamianReeves/write-file-action@6929a9a6d1807689191dcc8bbe62b54d70a32b42 # v1.3
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
-          path: app/src/main/assets/client_secrets.json
-          contents: ${{ secrets.GOOGLE_CLIENT_SECRETS_JSON }}
-          write-mode: overwrite
+          packages: 'platform-tools build-tools;35.0.1'
+          log-accepted-android-sdk-licenses: false
+
+      - name: Write client_secrets.json
+        env:
+          GOOGLE_CLIENT_SECRETS_JSON: ${{ secrets.GOOGLE_CLIENT_SECRETS_JSON }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$GOOGLE_CLIENT_SECRETS_JSON" ]]; then
+            mkdir -p app/src/main/assets
+            printf '%s' "$GOOGLE_CLIENT_SECRETS_JSON" > app/src/main/assets/client_secrets.json
+          fi
+
+      - name: Restore signing keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          for variable in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_PASSWORD ANDROID_KEY_ALIAS; do
+            if [[ -z "${!variable}" ]]; then
+              echo "::error::$variable is not configured"
+              exit 1
+            fi
+          done
+
+          umask 077
+          keystore_path="$RUNNER_TEMP/release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          test -s "$keystore_path"
+          echo "ANDROID_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+
+          # Supply signing only on the runner, without editing the project build files.
+          cat > "$RUNNER_TEMP/release-signing.gradle" <<'GRADLE'
+          allprojects { project ->
+              project.plugins.withId('com.android.application') {
+                  if (project.path == ':app') {
+                      project.extensions.getByName('androidComponents').finalizeDsl({ android ->
+                          def signing = android.signingConfigs.maybeCreate('githubActionsRelease')
+                          signing.storeFile = project.file(System.getenv('ANDROID_KEYSTORE_PATH'))
+                          signing.storePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                          signing.keyAlias = System.getenv('ANDROID_KEY_ALIAS')
+                          signing.keyPassword = System.getenv('ANDROID_KEY_PASSWORD')
+                          android.buildTypes.getByName('release').signingConfig = signing
+                      } as org.gradle.api.Action)
+                  }
+              }
+          }
+          GRADLE
 
       - name: Clean CMake cache
         run: rm -rf app/.cxx chimahon/.cxx
 
       - name: Build
-        run: ./gradlew assembleRelease -Penable-updater -PreleaseVersionName=${{ needs.get_tag.outputs.version_name }} -PreleaseVersionCode=${{ needs.get_tag.outputs.version_code }}
-
-      - name: Sign APK
-        uses: r0adkll/sign-android-release@f30bdd30588842ac76044ecdbd4b6d0e3e813478
-        with:
-          releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.SIGNING_KEY }}
-          alias: ${{ secrets.ALIAS }}
-          keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
-          keyPassword: ${{ secrets.KEY_PASSWORD }}
         env:
-          BUILD_TOOLS_VERSION: '35.0.1'
+          VERSION_NAME: ${{ steps.extract.outputs.version_name }}
+          VERSION_CODE: ${{ steps.extract.outputs.version_code }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          ./gradlew --init-script "$RUNNER_TEMP/release-signing.gradle" assembleRelease -Penable-updater \
+            "-PreleaseVersionName=$VERSION_NAME" "-PreleaseVersionCode=$VERSION_CODE"
+
+      - name: Verify signed APKs
+        run: |
+          set -euo pipefail
+          for abi in universal arm64-v8a armeabi-v7a x86 x86_64; do
+            "$ANDROID_HOME/build-tools/35.0.1/apksigner" verify --verbose \
+              "app/build/outputs/apk/release/app-$abi-release.apk"
+          done
 
       - name: Rename APK
+        env:
+          RELEASE_TAG: ${{ steps.extract.outputs.tag }}
         run: |
           set -e
 
-          mv app/build/outputs/apk/release/app-universal-release-unsigned-signed.apk chimahon-${{ needs.get_tag.outputs.tag }}.apk
-          mv app/build/outputs/apk/release/app-arm64-v8a-release-unsigned-signed.apk chimahon-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
-          mv app/build/outputs/apk/release/app-armeabi-v7a-release-unsigned-signed.apk chimahon-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
-          mv app/build/outputs/apk/release/app-x86-release-unsigned-signed.apk chimahon-x86-${{ needs.get_tag.outputs.tag }}.apk
-          mv app/build/outputs/apk/release/app-x86_64-release-unsigned-signed.apk chimahon-x86_64-${{ needs.get_tag.outputs.tag }}.apk
+          mv app/build/outputs/apk/release/app-universal-release.apk "chimahon-$RELEASE_TAG.apk"
+          mv app/build/outputs/apk/release/app-arm64-v8a-release.apk "chimahon-arm64-v8a-$RELEASE_TAG.apk"
+          mv app/build/outputs/apk/release/app-armeabi-v7a-release.apk "chimahon-armeabi-v7a-$RELEASE_TAG.apk"
+          mv app/build/outputs/apk/release/app-x86-release.apk "chimahon-x86-$RELEASE_TAG.apk"
+          mv app/build/outputs/apk/release/app-x86_64-release.apk "chimahon-x86_64-$RELEASE_TAG.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: chimahon
+          if-no-files-found: error
           path: |
-            chimahon-${{ needs.get_tag.outputs.tag }}.apk
-            chimahon-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
-            chimahon-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
-            chimahon-x86-${{ needs.get_tag.outputs.tag }}.apk
-            chimahon-x86_64-${{ needs.get_tag.outputs.tag }}.apk
-
-  release:
-    name: Create GitHub Release
-    runs-on: ubuntu-24.04
-    needs: [get_tag, build]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          merge-multiple: true
+            chimahon-${{ steps.extract.outputs.tag }}.apk
+            chimahon-arm64-v8a-${{ steps.extract.outputs.tag }}.apk
+            chimahon-armeabi-v7a-${{ steps.extract.outputs.tag }}.apk
+            chimahon-x86-${{ steps.extract.outputs.tag }}.apk
+            chimahon-x86_64-${{ steps.extract.outputs.tag }}.apk
 
       - name: Generate release notes from CHANGELOG
+        env:
+          VERSION_NAME: ${{ steps.extract.outputs.version_name }}
+          RELEASE_TAG: ${{ steps.extract.outputs.tag }}
         run: |
           set -e
 
-          version_name="${{ needs.get_tag.outputs.version_name }}"
+          version_name="$VERSION_NAME"
 
           changelog_section=$(awk -v v="$version_name" '
             $0 ~ "^## \\\[(v?" v ")\\\]" { found = 1; next }
@@ -157,30 +193,28 @@ jobs:
             } > release_notes.md
           else
             {
-              echo "Release ${{ needs.get_tag.outputs.tag }}"
+              echo "Release $RELEASE_TAG"
               echo
               echo "No matching section found in CHANGELOG.md for version $version_name."
             } > release_notes.md
           fi
           echo -e "\n<!-->" >> release_notes.md
 
-      - name: Delete all artifacts
-        uses: geekyeggo/delete-artifact@f275313e70c08f6120db482d7a6b98377786765b # v5.1.0
-        with:
-          failOnError: false
-          name: chimahon
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
-          tag_name: ${{ needs.get_tag.outputs.tag }}
-          name: Chimahon ${{ needs.get_tag.outputs.tag }}
+          tag_name: ${{ steps.extract.outputs.tag }}
+          name: Chimahon ${{ steps.extract.outputs.tag }}
           body_path: release_notes.md
           files: |
-            chimahon-${{ needs.get_tag.outputs.tag }}.apk
-            chimahon-arm64-v8a-${{ needs.get_tag.outputs.tag }}.apk
-            chimahon-armeabi-v7a-${{ needs.get_tag.outputs.tag }}.apk
-            chimahon-x86-${{ needs.get_tag.outputs.tag }}.apk
-            chimahon-x86_64-${{ needs.get_tag.outputs.tag }}.apk
+            chimahon-${{ steps.extract.outputs.tag }}.apk
+            chimahon-arm64-v8a-${{ steps.extract.outputs.tag }}.apk
+            chimahon-armeabi-v7a-${{ steps.extract.outputs.tag }}.apk
+            chimahon-x86-${{ steps.extract.outputs.tag }}.apk
+            chimahon-x86_64-${{ steps.extract.outputs.tag }}.apk
           draft: true
           prerelease: false
+
+      - name: Remove temporary signing files
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks" "$RUNNER_TEMP/release-signing.gradle"
