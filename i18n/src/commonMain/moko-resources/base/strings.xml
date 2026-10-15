@@ -432,6 +432,9 @@
     <string name="pref_ocr_two_finger_gesture_summary">Allow two-finger tap to toggle OCR overlay</string>
     <string name="ocr_ready">OCR ready</string>
     <string name="ocr_not_ready">OCR not ready</string>
+    <string name="screen_lookup_finding_text">Finding text…</string>
+    <string name="screen_lookup_no_text">No text found</string>
+    <string name="screen_lookup_tap_text">Tap highlighted text to look it up</string>
     <string name="ocr_running">OCR running…</string>
     <string name="action_download_and_ocr">Download &amp; OCR</string>
     <string name="action_run_ocr">Run OCR</string>
